@@ -71,4 +71,4 @@ The script assumes video and subtitle files are located in a specific directory 
 Contact Support
 ---------------
 
-If you encounter any issues, please contact support@example.com for assistance.# submaker
+If you encounter any issues, please contact bert@telkom.be for assistance.# submaker
