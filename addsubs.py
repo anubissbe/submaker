@@ -1,80 +1,87 @@
 import os
 import subprocess
-from pathlib import Path
 import requests
-import argostranslate.translate
-import logging
+from pathlib import Path
+import argostranslate.package, argostranslate.translate
+from langdetect import detect
 
-# Setup basic configuration for logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Define the base directory for video files
+BASE_DIRECTORY = "/mnt/media/complete/"
 
-# Load installed Argostranslate languages
+# API URL for the Whisper server
+WHISPER_SERVER_URL = "http://localhost:8000/transcribe"
+
+# Define valid video file extensions
+VIDEO_EXTS = ['.mp4', '.mkv', '.avi', '.m2ts', '.mov', '.wmv', '.flv', '.mpg',
+              '.mpeg', '.vob', '.rm', '.rmvb', '.3gp', '.divx', '.xvid', '.webm']
+
+# Initialize Argos Translate
 languages = argostranslate.translate.get_installed_languages()
-translation_models = {f"{lang_from.code}-{lang_to.code}": lang_from.get_translation(lang_to)
-                      for lang_from in languages for lang_to in languages if lang_from != lang_to}
+language_pairs = {f"{lang_from.code}-{lang_to.code}": lang_from.get_translation(lang_to)
+                  for lang_from in languages for lang_to in languages
+                  if lang_from.code != lang_to.code}
 
-def translate_subtitle(input_path, output_path, from_lang, to_lang):
-    try:
-        with open(input_path, 'r', encoding='utf-8') as file:
-            content = file.read()
-        translated_content = translation_models[f"{from_lang}-{to_lang}"].translate(content)
-        with open(output_path, 'w', encoding='utf-8') as file:
-            file.write(translated_content)
-        logging.info(f"Translated {input_path} from {from_lang} to {to_lang}")
-    except KeyError:
-        logging.error(f"No translation model found for {from_lang} to {to_lang}")
-
-def extract_audio(video_path, audio_output_path):
-    try:
-        command = ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "mp3", str(audio_output_path)]
-        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        logging.info(f"Extracted audio to {audio_output_path}")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to extract audio from {video_path}: {e}")
+def translate_subtitle(input_path, from_lang, to_lang):
+    """Translates subtitle files from one language to another."""
+    output_path = Path(str(input_path).replace(f".{from_lang}.srt", f".{to_lang}.srt"))
+    if output_path.exists():
+        return  # Skip if translation already exists
+    
+    with open(input_path, 'r', encoding='utf-8') as file:
+        content = file.read()
+    
+    translation = language_pairs[f"{from_lang}-{to_lang}"].translate(content)
+    with open(output_path, 'w', encoding='utf-8') as file:
+        file.write(translation)
+    print(f"Translated {input_path} from {from_lang} to {to_lang}")
 
 def transcribe_audio(audio_path):
-    try:
-        url = "http://localhost:8001/transcribe"
-        with open(audio_path, 'rb') as file:
-            files = {'file': file}
-            response = requests.post(url, files=files)
-        transcription = response.json()['transcription']
-        logging.info(f"Transcribed audio {audio_path}")
-        return transcription
-    except Exception as e:
-        logging.error(f"Failed to transcribe {audio_path}: {e}")
-        return ""
+    """Send audio file to Whisper server and receive transcription."""
+    with open(audio_path, 'rb') as file:
+        response = requests.post(WHISPER_SERVER_URL, files={'file': file})
+    return response.json()['transcription']
 
-def process_directory(directory):
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            file_path = Path(root) / file
-            if file_path.suffix in ['.mp4', '.mkv', '.avi', '.m2ts', '.mov', '.wmv', '.flv', '.mpg', '.mpeg', '.vob', '.rm', '.rmvb', '.3gp', '.divx', '.xvid', '.webm']:
-                base_name = file_path.stem
-                audio_path = file_path.with_suffix('.mp3')
-                sub_paths = {lang: file_path.parent / f"{base_name}.{lang}.srt" for lang in ['en', 'ar', 'nl']}
-                
-                # Check and generate missing subtitles through translation
-                existing_subs = {lang: path for lang, path in sub_paths.items() if path.exists()}
-                missing_langs = [lang for lang in ['en', 'ar', 'nl'] if lang not in existing_subs.keys()]
-                
-                # Translate existing subtitles to missing languages if possible
-                for existing_lang, existing_path in existing_subs.items():
-                    for missing_lang in missing_langs:
-                        if f"{existing_lang}-{missing_lang}" in translation_models:
-                            translate_subtitle(existing_path, sub_paths[missing_lang], existing_lang, missing_lang)
-                
-                # If no subtitles exist, transcribe using Whisper
-                if not existing_subs:
-                    if not audio_path.exists():
-                        extract_audio(file_path, audio_path)
-                    transcription = transcribe_audio(audio_path)
-                    # Create subtitles for each required language (assuming English transcription first)
-                    with open(sub_paths['en'], 'w') as f:
-                        f.write(transcription)
-                    translate_subtitle(sub_paths['en'], sub_paths['ar'], 'en', 'ar')
-                    translate_subtitle(sub_paths['en'], sub_paths['nl'], 'en', 'nl')
+def extract_audio(video_path):
+    """Extract audio from video file to use for transcription."""
+    audio_path = video_path.with_suffix('.mp3')
+    if not audio_path.exists():
+        command = ['ffmpeg', '-i', str(video_path), '-vn', '-acodec', 'mp3', str(audio_path)]
+        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return audio_path
+
+def process_video_file(video_path):
+    """Process a single video file to handle subtitles."""
+    has_subs = {lang: False for lang in ['en', 'ar', 'nl']}
+    for sub_ext in ['.en.srt', '.ar.srt', '.nl.srt']:
+        if (video_path.with_suffix(sub_ext)).exists():
+            has_subs[sub_ext[1:3]] = True
+
+    if all(has_subs.values()):
+        return  # All required subtitles exist
+
+    if not any(has_subs.values()):  # No subtitles, extract and transcribe
+        audio_path = extract_audio(video_path)
+        transcription = transcribe_audio(audio_path)
+        for lang_code in ['en', 'ar', 'nl']:
+            sub_path = video_path.with_suffix(f'.{lang_code}.srt')
+            with open(sub_path, 'w', encoding='utf-8') as file:
+                file.write(transcription)
+            print(f"Transcribed audio to {sub_path}")
+    else:
+        for lang_code, exists in has_subs.items():
+            if not exists:
+                # Find existing subtitle file
+                existing_sub = next((p for p in has_subs if has_subs[p]), None)
+                translate_subtitle(video_path.with_suffix(f'.{existing_sub}.srt'), existing_sub[:2], lang_code)
+
+def main():
+    """Main function to walk through directories and process video files."""
+    for dirpath, _, filenames in os.walk(BASE_DIRECTORY):
+        for filename in filenames:
+            file_path = Path(dirpath) / filename
+            if file_path.suffix.lower() in VIDEO_EXTS:
+                process_video_file(file_path)
 
 if __name__ == "__main__":
-    process_directory('/mnt/media/complete/')
+    main()
 

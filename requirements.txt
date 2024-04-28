@@ -1,5 +1,6 @@
-fastapi==0.75.0
-uvicorn==0.16.0
-whisper==0.3.0
-argostranslate==2.1.0
-requests==2.27.1
+fastapi
+uvicorn
+whisper
+argostranslate
+langdetect
+
